@@ -1,9 +1,12 @@
+
 using System;
+using System.Buffers;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -110,7 +113,47 @@ public partial class AudioClient
 
         using BinaryContent content = options.ToBinaryContent();
         ClientResult result = await GenerateSpeechAsync(content, cancellationToken.ToRequestOptions()).ConfigureAwait(false);
+        await result.GetRawResponse().BufferContentAsync(cancellationToken).ConfigureAwait(false);
         return ClientResult.FromValue(result.GetRawResponse().Content, result.GetRawResponse());
+    }
+
+    /// <summary> Generates a life-like, spoken audio recording of the input text. </summary>
+    /// <remarks>
+    ///     The default format of the generated audio is <see cref="GeneratedSpeechFormat.Mp3"/> unless otherwise specified
+    ///     via <see cref="SpeechGenerationOptions.ResponseFormat"/>.
+    /// </remarks>
+    /// <param name="text"> The text to generate audio for. </param>
+    /// <param name="voice"> The voice to use in the generated audio. </param>
+    /// <param name="options"> The options to configure the audio generation. </param>
+    /// <param name="cancellationToken"> A token that can be used to cancel this method call. </param>
+    /// <exception cref="ArgumentNullException"> <paramref name="text"/> is null. </exception>
+    /// <returns> Streaming chunks of the generated audio in the specified output format. </returns>
+    public virtual async IAsyncEnumerable<BinaryData> GenerateSpeechStreamingAsync(string text, GeneratedSpeechVoice voice, SpeechGenerationOptions options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        Argument.AssertNotNull(text, nameof(text));
+
+        options ??= new();
+        CreateSpeechGenerationOptions(text, voice, ref options);
+
+        using BinaryContent content = options.ToBinaryContent();
+        var requestOptions = cancellationToken.ToRequestOptions();
+        using PipelineMessage message = CreateCreateSpeechRequest(content, requestOptions);
+        message.BufferResponse = false;
+        var result = ClientResult.FromResponse(await Pipeline.ProcessMessageAsync(message, requestOptions).ConfigureAwait(false));
+        var stream = result.GetRawResponse().ContentStream;
+        var buffer = ArrayPool<byte>.Shared.Rent(1024 * 16);
+        try
+        {
+            int bytesRead;
+            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) != 0)
+            {
+                yield return BinaryData.FromBytes(buffer.AsMemory(0, bytesRead));
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     /// <summary> Generates a life-like, spoken audio recording of the input text. </summary>
